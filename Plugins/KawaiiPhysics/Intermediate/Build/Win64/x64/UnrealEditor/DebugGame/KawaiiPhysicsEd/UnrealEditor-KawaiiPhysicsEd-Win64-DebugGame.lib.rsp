@@ -1,0 +1,12 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UnrealEditor-KawaiiPhysicsEd-Win64-DebugGame.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"C:/git/GameEngine1Project/Intermediate/Build/Win64/x64/GameEngine1ProjectEditor/DebugGame/UnrealEd/SharedPCH.UnrealEd.Project.NonOptimized.ValApi.ValExpApi.Cpp20.InclOrderUnreal5_4.h.obj"
+"C:/git/GameEngine1Project/Plugins/KawaiiPhysics/Intermediate/Build/Win64/x64/UnrealEditor/DebugGame/KawaiiPhysicsEd/Module.KawaiiPhysicsEd.cpp.obj"
+"C:/git/GameEngine1Project/Plugins/KawaiiPhysics/Intermediate/Build/Win64/x64/UnrealEditor/DebugGame/KawaiiPhysicsEd/Default.rc2.res"
+/OUT:"C:/git/GameEngine1Project/Plugins/KawaiiPhysics/Intermediate/Build/Win64/x64/UnrealEditor/DebugGame/KawaiiPhysicsEd/UnrealEditor-KawaiiPhysicsEd-Win64-DebugGame.lib"
