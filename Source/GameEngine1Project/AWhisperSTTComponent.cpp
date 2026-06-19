@@ -7,6 +7,19 @@
 #include "Interfaces/VoiceCapture.h"
 #include "Async/Async.h"
 
+namespace
+{
+	bool WhisperAbortCallback(void* UserData)
+	{
+		const std::atomic<bool>* CancelRequested = static_cast<const std::atomic<bool>*>(UserData);
+		return CancelRequested && CancelRequested->load(std::memory_order_relaxed);
+	}
+
+	bool WhisperEncoderBeginCallback(whisper_context* Context, whisper_state* State, void* UserData)
+	{
+		return !WhisperAbortCallback(UserData);
+	}
+}
 
 // Sets default values
 AAWhisperSTTComponent::AAWhisperSTTComponent()
@@ -21,6 +34,13 @@ AAWhisperSTTComponent::AAWhisperSTTComponent()
 bool AAWhisperSTTComponent::InitWhisperModel(const FString& ModelPath)
 {
 	// 이미 불러온 모델이 있다면 메모리에서 먼저 지웁니다.
+	bRecognitionCancelRequested.store(true, std::memory_order_relaxed);
+
+	if (RecognitionTask.IsValid() && !RecognitionTask.IsReady())
+	{
+		RecognitionTask.Wait();
+	}
+
 	FScopeLock Lock(&WhisperMutex);
 
 	if (WhisperCtx != nullptr)
@@ -41,6 +61,7 @@ bool AAWhisperSTTComponent::InitWhisperModel(const FString& ModelPath)
 		return false;
 	}
 
+	bRecognitionCancelRequested.store(false, std::memory_order_relaxed);
 	UE_LOG(LogTemp, Log, TEXT("Whisper 모델 로드 성공!"));
 	return true;
 }
@@ -50,7 +71,7 @@ FString AAWhisperSTTComponent::RecognizeSpeech(const TArray<float>& AudioSamples
 
 	FScopeLock Lock(&WhisperMutex);
 	// 모델이 안 불러와졌거나, 오디오 데이터가 없으면 빈 글자를 반환합니다.
-	if (WhisperCtx == nullptr || AudioSamples.Num() == 0)
+	if (WhisperCtx == nullptr || AudioSamples.Num() == 0 || bRecognitionCancelRequested.load(std::memory_order_relaxed))
 	{
 		return FString("");
 	}
@@ -60,10 +81,19 @@ FString AAWhisperSTTComponent::RecognizeSpeech(const TArray<float>& AudioSamples
 	Params.print_progress = false; // 콘솔창에 진행률 도배되는 것 방지
 	Params.language = language.data();        // 한국어 인식 설정 (영어면 "en")
 	Params.no_context = true;
+	Params.abort_callback = WhisperAbortCallback;
+	Params.abort_callback_user_data = &bRecognitionCancelRequested;
+	Params.encoder_begin_callback = WhisperEncoderBeginCallback;
+	Params.encoder_begin_callback_user_data = &bRecognitionCancelRequested;
 	// ⭐️ 여기서 AI 연산이 시작됩니다! (오디오 배열을 넘겨줌)
 	if (whisper_full(WhisperCtx, Params, AudioSamples.GetData(), AudioSamples.Num()) != 0)
 	{
 		//UE_LOG(LogTemp, Error, TEXT("음성 인식 처리에 실패했습니다."));
+		return FString("");
+	}
+
+	if (bRecognitionCancelRequested.load(std::memory_order_relaxed))
+	{
 		return FString("");
 	}
 
@@ -85,11 +115,19 @@ void AAWhisperSTTComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 
 	bIsRecording = false;
+	bRecognitionCancelRequested.store(true, std::memory_order_relaxed);
 
 	if (AudioCaptureNative.IsStreamOpen())
 	{
-		AudioCaptureNative.StopStream();
-		AudioCaptureNative.CloseStream();
+		if (AudioCaptureNative.IsCapturing())
+		{
+			AudioCaptureNative.AbortStream();
+		}
+
+		if (AudioCaptureNative.IsStreamOpen())
+		{
+			AudioCaptureNative.CloseStream();
+		}
 	}
 
 	// 실행 중인 음성인식 스레드 종료 대기
@@ -187,7 +225,7 @@ void AAWhisperSTTComponent::StartRecording(FString DeviceName)
 
 	// 🚨 스위치를 켭니다! 
 	bIsRecording = true;
-	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Green, FString::Printf(TEXT("마이크 녹음 시작! (%s)"), *DeviceName));
+	//if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Green, FString::Printf(TEXT("마이크 녹음 시작! (%s)"), *DeviceName));
 }
 TArray<FString> AAWhisperSTTComponent::GetAvailableMicrophones()
 {
@@ -217,9 +255,48 @@ TArray<FString> AAWhisperSTTComponent::GetAvailableMicrophones()
 void AAWhisperSTTComponent::StopRecordingAndRecognize()
 {
 	bIsRecording = false;
-	FScopeLock Lock(&AudioMutex);
 
-	if (CapturedAudioData.Num() == 0) return; // return ""; 에서 수정
+	if (AudioCaptureNative.IsStreamOpen())
+	{
+		if (AudioCaptureNative.IsCapturing())
+		{
+			AudioCaptureNative.StopStream();
+		}
+
+		AudioCaptureNative.CloseStream();
+	}
+
+	if (bRecognitionCancelRequested.load(std::memory_order_relaxed))
+	{
+		return;
+	}
+
+	if (RecognitionTask.IsValid() && !RecognitionTask.IsReady())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Whisper 인식 작업이 아직 실행 중이라 새 인식을 건너뜁니다."));
+		FScopeLock Lock(&AudioMutex);
+		CapturedAudioData.Empty();
+		return;
+	}
+
+	TArray<float> AudioDataForRecognition;
+	int32 SampleRateForRecognition = 16000;
+
+	{
+		FScopeLock Lock(&AudioMutex);
+
+		if (CapturedAudioData.Num() == 0) return; // return ""; 에서 수정
+
+		if (CapturedAudioData.Num() < HardwareSampleRate * 0.3f)
+		{
+			CapturedAudioData.Empty();
+			return;
+		}
+
+		AudioDataForRecognition = MoveTemp(CapturedAudioData);
+		CapturedAudioData.Empty();
+		SampleRateForRecognition = HardwareSampleRate;
+	}
 
 	// ... (MaxVolume 계산, 16000Hz 리샘플링 코드는 그대로 유지) ...
 
@@ -229,35 +306,33 @@ void AAWhisperSTTComponent::StopRecordingAndRecognize()
 	// static FString result; 
 		// 16000Hz 리샘플링
 	TArray<float> ResampledData;
-	if (HardwareSampleRate == 16000)
+	if (SampleRateForRecognition == 16000)
 	{
-		ResampledData = CapturedAudioData;
+		ResampledData = MoveTemp(AudioDataForRecognition);
 	}
 	else
 	{
-		float Ratio = (float)HardwareSampleRate / 16000.0f;
-		int32 NewSize = FMath::FloorToInt(CapturedAudioData.Num() / Ratio);
+		float Ratio = (float)SampleRateForRecognition / 16000.0f;
+		int32 NewSize = FMath::FloorToInt(AudioDataForRecognition.Num() / Ratio);
 		ResampledData.Reserve(NewSize);
 
 		for (int32 i = 0; i < NewSize; ++i)
 		{
-			int32 Index = FMath::Clamp(FMath::RoundToInt(i * Ratio), 0, CapturedAudioData.Num() - 1);
-			ResampledData.Add(CapturedAudioData[Index]);
+			int32 Index = FMath::Clamp(FMath::RoundToInt(i * Ratio), 0, AudioDataForRecognition.Num() - 1);
+			ResampledData.Add(AudioDataForRecognition[Index]);
 		}
 	}
-	if (CapturedAudioData.Num() < HardwareSampleRate * 0.3f)
-	{
-		return;
-	}
+	bRecognitionCancelRequested.store(false, std::memory_order_relaxed);
+
 	RecognitionTask = Async(EAsyncExecution::Thread, [WeakThis, ResampledData]()
 		{
-			if (!WeakThis.IsValid()) return;
+			if (!WeakThis.IsValid() || WeakThis->bRecognitionCancelRequested.load(std::memory_order_relaxed)) return;
 
 			FString FinalResult = WeakThis->RecognizeSpeech(ResampledData);
 
 			AsyncTask(ENamedThreads::GameThread, [WeakThis, FinalResult]()
 				{
-					if (WeakThis.IsValid())
+					if (WeakThis.IsValid() && !WeakThis->bRecognitionCancelRequested.load(std::memory_order_relaxed))
 					{
 						FString s = FinalResult;
 						for (const FString& str : WeakThis->prohibitionWord)
@@ -270,8 +345,6 @@ void AAWhisperSTTComponent::StopRecordingAndRecognize()
 					}
 				});
 		});
-
-	CapturedAudioData.Empty();
 
 	// 🚨 [삭제] return result; 는 지워줍니다.
 }

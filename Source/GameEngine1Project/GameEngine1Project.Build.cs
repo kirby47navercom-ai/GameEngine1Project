@@ -8,9 +8,9 @@ public class GameEngine1Project : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 	
-		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore","Voice", "AudioCapture" ,"AudioCaptureCore" });
+		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore","Voice", "AudioCapture" ,"AudioCaptureCore", "UMG" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] {  });
+		PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
 
         // Whisper 서드파티 라이브러리 경로 설정
         string WhisperPath = Path.Combine(ModuleDirectory, "ThirdParty", "Whisper");

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
@@ -15,7 +16,7 @@ THIRD_PARTY_INCLUDES_END
 #include "AWhisperSTTComponent.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSpeechRecognized, FString, RecognizedText);
-UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
+UCLASS()
 class GAMEENGINE1PROJECT_API AAWhisperSTTComponent : public AActor
 {
 	GENERATED_BODY()
@@ -68,6 +69,7 @@ private:
 	TFuture<void> RecognitionTask;//보조 스레드의 작업 상태를 담아둘 박스
 	int32 HardwareSampleRate = 16000;
 	bool bIsRecording = false;
+	std::atomic<bool> bRecognitionCancelRequested{ false };
 	std::string language =  "ko";
 	TArray<FString> prohibitionWord{ TEXT(" "),TEXT("."),TEXT(","),TEXT("?"),
 		TEXT("!"),TEXT("~"),TEXT("("),TEXT(")"),TEXT("\'"),TEXT("\"") };
